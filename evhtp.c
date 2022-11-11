@@ -3502,7 +3502,7 @@ evhtp_parse_query_wflags(const char * query, const size_t len, const int flags)
     key_idx    = 0;
     val_idx    = 0;
 
-#ifdef EVHTP_HAS_C99
+#ifdef EVHTP_HAS_C99_DEL
     char   key_buf[len + 1];
     char   val_buf[len + 1];
 #else
@@ -3724,14 +3724,14 @@ evhtp_parse_query_wflags(const char * query, const size_t len, const int flags)
         } while (0);
     }
 
-#ifndef EVHTP_HAS_C99
+#ifndef EVHTP_HAS_C99_DEL
     evhtp_safe_free(key_buf, htp__free_);
     evhtp_safe_free(val_buf, htp__free_);
 #endif
 
     return query_args;
 error:
-#ifndef EVHTP_HAS_C99
+#ifndef EVHTP_HAS_C99_DEL
     evhtp_safe_free(key_buf, htp__free_);
     evhtp_safe_free(val_buf, htp__free_);
 #endif
@@ -4075,13 +4075,13 @@ evhtp_bind_sockaddr(evhtp_t         * htp,
         if (htp__serv_setsockopts_(htp, fd) == -1) {
             break;
         }
-
+#ifdef IPV6_V6ONLY_FLAG
         if (sa->sa_family == AF_INET6) {
             if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on)) == -1) {
                 break;
             }
         }
-
+#endif
         if (bind(fd, sa, sin_len) == -1) {
             break;
         }
@@ -4758,6 +4758,18 @@ evhtp_ssl_use_threads(void)
 
 #endif
 
+#if defined(SSL3_FLAGS_NO_RENEGOTIATE_CIPHERS)
+static void 
+ssl_info_cb(const SSL *ssl, int where, int ret)
+{
+    (void)ret;
+    if ((where & SSL_CB_HANDSHAKE_DONE) != 0) 
+    {
+        // disable renegotiation (CVE-2009-3555)
+        ssl->s3->flags |= SSL3_FLAGS_NO_RENEGOTIATE_CIPHERS;
+    }
+}
+#endif
 int
 evhtp_ssl_init(evhtp_t * htp, evhtp_ssl_cfg_t * cfg)
 {
@@ -4820,7 +4832,10 @@ evhtp_ssl_init(evhtp_t * htp, evhtp_ssl_cfg_t * cfg)
 #endif
 
     SSL_CTX_set_options(htp->ssl_ctx, cfg->ssl_opts);
-
+//openssl 1.0.2  
+#if defined(SSL3_FLAGS_NO_RENEGOTIATE_CIPHERS)
+    SSL_CTX_set_info_callback(htp->ssl_ctx, ssl_info_cb);
+#endif
 #ifndef OPENSSL_NO_ECDH
     if (cfg->named_curve != NULL) {
         EC_KEY * ecdh = NULL;
