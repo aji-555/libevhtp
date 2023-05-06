@@ -4758,6 +4758,7 @@ evhtp_ssl_use_threads(void)
 
 #endif
 
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
 #if defined(SSL3_FLAGS_NO_RENEGOTIATE_CIPHERS)
 static void 
 ssl_info_cb(const SSL *ssl, int where, int ret)
@@ -4770,6 +4771,41 @@ ssl_info_cb(const SSL *ssl, int where, int ret)
     }
 }
 #endif
+#endif
+
+int evhtp_ssl_is_sm_cert(const char *certfile)
+{
+    BIO *bio = BIO_new_file(certfile, "r");
+    if (!bio) {
+        log_error("fail to open cert file:%s, errno:%d, error:%s", errno, certfile, strerror(errno));
+        return 0;
+    }
+
+    X509 *x509 = PEM_read_bio_X509(bio, NULL, 0, NULL);
+    if (x509 == NULL) {
+        BIO_free(bio);
+        log_error("fail to load cert file:%s to x509 format, error:%s", certfile, strerror(errno));
+        return 0;
+    }
+
+
+
+    int nid = X509_get_signature_nid(x509);
+
+#ifndef NID_SM2_with_SM3
+#define NID_SM2_with_SM3 NID_undef
+#endif
+
+    if (NID_SM2_with_SM3 == nid)  {
+        X509_free(x509);
+        BIO_free(bio);
+        return 1;
+    }
+    X509_free(x509);
+    BIO_free(bio);
+    return 0;
+}
+
 int
 evhtp_ssl_init(evhtp_t * htp, evhtp_ssl_cfg_t * cfg)
 {
@@ -4833,8 +4869,10 @@ evhtp_ssl_init(evhtp_t * htp, evhtp_ssl_cfg_t * cfg)
 
     SSL_CTX_set_options(htp->ssl_ctx, cfg->ssl_opts);
 //openssl 1.0.2  
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
 #if defined(SSL3_FLAGS_NO_RENEGOTIATE_CIPHERS)
     SSL_CTX_set_info_callback(htp->ssl_ctx, ssl_info_cb);
+#endif
 #endif
 #ifndef OPENSSL_NO_ECDH
     if (cfg->named_curve != NULL) {
@@ -4883,12 +4921,30 @@ evhtp_ssl_init(evhtp_t * htp, evhtp_ssl_cfg_t * cfg)
 #endif      /* OPENSSL_NO_DH */
 
     if (cfg->ciphers != NULL) {
-        if (SSL_CTX_set_cipher_list(htp->ssl_ctx, cfg->ciphers) == 0) {
-            log_error("set_cipher_list");
-            return -1;
+        if (cfg->pemfile != NULL) {
+            int is_sm_cert = evhtp_ssl_is_sm_cert(cfg->pemfile);
+            if (is_sm_cert) {
+                SSL_CTX_set_options(htp->ssl_ctx, SSL_OP_CIPHER_SERVER_PREFERENCE);
+    #ifdef SM4_CIPHERSUITES
+                SSL_CTX_enable_sm_tls13_strict(htp->ssl_ctx);
+    #endif
+    #if defined(OPENSSL_VERSION_NUMBER) && OPENSSL_VERSION_NUMBER > 0x10101000L            
+                if (SSL_CTX_set_ciphersuites(htp->ssl_ctx, cfg->ciphers) == 0) {
+                    log_error("fail to set sm ciphersuites(%s)", cfg->ciphers);
+                    return -1;
+                }
+    #else
+                log_error("fail to set sm ciphersuites(%s), openssl library(%s) does not support sm cipher", cfg->ciphers, OPENSSL_VERSION_TEXT);
+                return -1;
+    #endif   
+            } else {
+                if (SSL_CTX_set_cipher_list(htp->ssl_ctx, cfg->ciphers) == 0) {
+                    log_error("set_cipher_list");
+                    return -1;
+                }
+            }
         }
     }
-
     SSL_CTX_load_verify_locations(htp->ssl_ctx, cfg->cafile, cfg->capath);
     X509_STORE_set_flags(SSL_CTX_get_cert_store(htp->ssl_ctx), cfg->store_flags);
     SSL_CTX_set_verify(htp->ssl_ctx, cfg->verify_peer, cfg->x509_verify_cb);
